@@ -69,6 +69,21 @@ async def on_ready():
     await bot.tree.sync()
     print(f"Connected as {bot.user}")
 
+# --- Global error handler for slash commands ---
+@bot.tree.error
+async def on_app_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
+    # If we already sent a response or deferred, follow up
+    if interaction.response.is_done():
+        await interaction.followup.send(
+            "❌ An unexpected error occurred. Please try again later.", ephemeral=True
+        )
+    else:
+        await interaction.response.send_message(
+            "❌ An error occurred processing your command.", ephemeral=True
+        )
+    # Log the error details
+    print(f"Error in command '{interaction.command.name}': {error!r}")
+
 # --- /toggle_gambling ---
 @bot.tree.command(name="toggle_gambling", description="Enable or disable gambling (staff only)")
 async def slash_toggle_gambling(interaction: discord.Interaction):
@@ -84,11 +99,10 @@ async def slash_toggle_gambling(interaction: discord.Interaction):
 @bot.tree.command(name="create_business", description="Open a new business account")
 @app_commands.describe(name="Unique business account name")
 async def slash_create_business(interaction: discord.Interaction, name: str):
-    key = name.lower()
-    if key in businesses:
+    if name.lower() in businesses:
         return await interaction.response.send_message("A business with that name already exists.", ephemeral=True)
 
-    businesses[key] = {"owner": interaction.user.id, "members": [], "balance": 0}
+    businesses[name.lower()] = {"owner": interaction.user.id, "members": [], "balance": 0}
     save_businesses()
     await interaction.response.send_message(f"Business '{name}' created. You are the owner.", ephemeral=True)
 
@@ -96,8 +110,7 @@ async def slash_create_business(interaction: discord.Interaction, name: str):
 @bot.tree.command(name="business_add_member", description="Allow a user to operate your business account")
 @app_commands.describe(business="Your business name", member="User to add")
 async def slash_business_add_member(interaction: discord.Interaction, business: str, member: discord.Member):
-    key = business.lower()
-    biz = businesses.get(key)
+    biz = businesses.get(business.lower())
     if not biz or biz["owner"] != interaction.user.id:
         return await interaction.response.send_message("You are not the owner of that business.", ephemeral=True)
 
@@ -112,11 +125,13 @@ async def slash_business_add_member(interaction: discord.Interaction, business: 
 @bot.tree.command(name="business_dashboard", description="View details of your business account")
 @app_commands.describe(business="Business account name")
 async def slash_business_dashboard(interaction: discord.Interaction, business: str):
-    key = business.lower()
-    biz = businesses.get(key)
+    # defer early to avoid interaction timeout during fetch_user calls
+    await interaction.response.defer(ephemeral=True)
+
+    biz = businesses.get(business.lower())
     allowed = [biz["owner"]] + biz.get("members", []) if biz else []
     if not biz or interaction.user.id not in allowed:
-        return await interaction.response.send_message("You are not authorized for that business.", ephemeral=True)
+        return await interaction.followup.send("You are not authorized for that business.", ephemeral=True)
 
     # resolve owner
     owner = bot.get_user(biz["owner"]) or await bot.fetch_user(biz["owner"])
@@ -129,14 +144,11 @@ async def slash_business_dashboard(interaction: discord.Interaction, business: s
         member_labels.append(f"{u.name}#{u.discriminator}")
 
     members_text = ", ".join(member_labels) if member_labels else "None"
-    balance = biz["balance"]
-
-    await interaction.response.send_message(
+    await interaction.followup.send(
         f"Business '{business}' Dashboard\n"
         f"- Owner: {owner_label}\n"
         f"- Members: {members_text}\n"
-        f"- Balance: ${balance}",
-        ephemeral=True
+        f"- Balance: ${biz['balance']}"
     )
 
 # --- /delete_business ---
@@ -146,11 +158,10 @@ async def slash_delete_business(interaction: discord.Interaction, business: str)
     if "Bank management board" not in [r.name for r in interaction.user.roles]:
         return await interaction.response.send_message("You do not have permission.", ephemeral=True)
 
-    key = business.lower()
-    if key not in businesses:
+    if business.lower() not in businesses:
         return await interaction.response.send_message("No such business exists.", ephemeral=True)
 
-    businesses.pop(key)
+    businesses.pop(business.lower())
     save_businesses()
     await interaction.response.send_message(f"Business '{business}' has been deleted.", ephemeral=False)
 
@@ -159,38 +170,26 @@ async def slash_delete_business(interaction: discord.Interaction, business: str)
     name="check_account",
     description="Check any personal or business account balance (staff only)"
 )
-@app_commands.describe(
-    member="User whose personal balance to check",
-    business="Optional business account name"
-)
+@app_commands.describe(member="User whose personal balance to check", business="Optional business account name")
 async def slash_check_account(interaction: discord.Interaction, member: discord.Member, business: str = None):
     if "Bank management board" not in [r.name for r in interaction.user.roles]:
         return await interaction.response.send_message("You do not have permission.", ephemeral=True)
 
     if business:
-        key = business.lower()
-        biz = businesses.get(key)
+        biz = businesses.get(business.lower())
         if not biz:
             return await interaction.response.send_message("No such business exists.", ephemeral=True)
-        balance = biz["balance"]
-        await interaction.response.send_message(
-            f"Business '{business}' balance: ${balance}",
-            ephemeral=True
-        )
+        await interaction.response.send_message(f"Business '{business}' balance: ${biz['balance']}", ephemeral=True)
     else:
         bal = get_balance(member.id)
-        await interaction.response.send_message(
-            f"{member.name}#{member.discriminator} personal balance: ${bal}",
-            ephemeral=True
-        )
+        await interaction.response.send_message(f"{member.name}#{member.discriminator} personal balance: ${bal}", ephemeral=True)
 
 # --- /balance ---
 @bot.tree.command(name="balance", description="Check your personal or business balance")
 @app_commands.describe(business="Optional business name")
 async def slash_balance(interaction: discord.Interaction, business: str = None):
     if business:
-        key = business.lower()
-        biz = businesses.get(key)
+        biz = businesses.get(business.lower())
         allowed = [biz["owner"]] + biz.get("members", []) if biz else []
         if not biz or interaction.user.id not in allowed:
             return await interaction.response.send_message("No access to that business.", ephemeral=True)
@@ -201,14 +200,17 @@ async def slash_balance(interaction: discord.Interaction, business: str = None):
 
 # --- /deposit ---
 @bot.tree.command(name="deposit", description="Request a deposit (proof required)")
-@app_commands.describe(amount="Amount to deposit", proof="Screenshot proof", business="Optional business name")
+@app_commands.describe(
+    amount="Amount to deposit",
+    proof="Screenshot proof",
+    business="Optional business name"
+)
 async def slash_deposit(interaction: discord.Interaction, amount: int, proof: discord.Attachment, business: str = None):
     if amount <= 0:
         return await interaction.response.send_message("Amount must be greater than 0.", ephemeral=True)
 
     if business:
-        key = business.lower()
-        biz = businesses.get(key)
+        biz = businesses.get(business.lower())
         allowed = [biz["owner"]] + biz.get("members", []) if biz else []
         if not biz or interaction.user.id not in allowed:
             return await interaction.response.send_message("No access to that business.", ephemeral=True)
@@ -219,7 +221,9 @@ async def slash_deposit(interaction: discord.Interaction, amount: int, proof: di
         target_label = "personal"
 
     chan = bot.get_channel(DEPOSIT_CHANNEL_ID)
-    await chan.send(f"Deposit Request: {interaction.user.mention} -> {target_label} ${amount}\nProof: {proof.url}")
+    await chan.send(
+        f"Deposit Request: {interaction.user.mention} -> {target_label} ${amount}\nProof: {proof.url}"
+    )
     await interaction.response.send_message(f"Deposit request of ${amount} sent to staff.", ephemeral=True)
 
     if business:
@@ -229,14 +233,16 @@ async def slash_deposit(interaction: discord.Interaction, amount: int, proof: di
 
 # --- /withdraw ---
 @bot.tree.command(name="withdraw", description="Request a withdrawal")
-@app_commands.describe(amount="Amount to withdraw", business="Optional business name")
+@app_commands.describe(
+    amount="Amount to withdraw",
+    business="Optional business name"
+)
 async def slash_withdraw(interaction: discord.Interaction, amount: int, business: str = None):
     if amount <= 0:
         return await interaction.response.send_message("Amount must be greater than 0.", ephemeral=True)
 
     if business:
-        key = business.lower()
-        biz = businesses.get(key)
+        biz = businesses.get(business.lower())
         allowed = [biz["owner"]] + biz.get("members", []) if biz else []
         if not biz or interaction.user.id not in allowed:
             return await interaction.response.send_message("No access to that business.", ephemeral=True)
@@ -292,8 +298,7 @@ async def slash_approve(
     target_label = "personal"
     biz = None
     if business:
-        key = business.lower()
-        biz = businesses.get(key)
+        biz = businesses.get(business.lower())
         if not biz:
             return await interaction.response.send_message("No such business.", ephemeral=True)
         target_label = business
@@ -337,7 +342,11 @@ async def slash_approve(
 
 # --- /reject ---
 @bot.tree.command(name="reject", description="Reject a deposit or withdrawal (staff only)")
-@app_commands.describe(member="User whose request you're rejecting", action="deposit or withdraw", business="Optional business name")
+@app_commands.describe(
+    member="User whose request you're rejecting",
+    action="deposit or withdraw",
+    business="Optional business name"
+)
 async def slash_reject(interaction: discord.Interaction, member: discord.Member, action: str, business: str = None):
     if "Bank management board" not in [r.name for r in interaction.user.roles]:
         return await interaction.response.send_message("You do not have permission.", ephemeral=True)
